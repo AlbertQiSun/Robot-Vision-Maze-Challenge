@@ -22,10 +22,21 @@ python player.py
 unless you have photographic memories!
 
 # Baseline Solution
-1. Download exploration data from link provided in the class.
-2. Unzip exploration_data.zip and place 'images' and 'images_subsample' under 'vis_nav_player/data' folder.
-3. Place 'startup.json' under 'vis_nav_player/' folder.
-4. Run baseline code
+## How to run the baseline
+1. Download the exploration data and extract it to `./data`. Under your data folder, you should at least have:
    ```
-   python baseline.py
+   data
+   ├── data_info.json
+   ├── images
    ```
+2. Run the baseline solution by `python source/baseline.py`. The first run may take longer as we need to download data for the maze and computes the features for localization and navigation.
+3. Press `q` to show the navigation panel.
+
+## How the baseline works
+The baseline (`source/baseline.py`) implements a visual place recognition pipeline:
+
+1. **Feature Extraction** — RootSIFT descriptors from exploration images
+2. **Codebook** — K-Means clustering (k=128) to build a visual vocabulary
+3. **VLAD Encoding** — Aggregate local descriptors into a global vector per image (with intra-normalization and power normalization)
+4. **Graph Construction** — Temporal edges (consecutive frames) + visual shortcut edges (top-K most similar non-adjacent frames)
+5. **Localization & Planning** — Match current FPV to database via VLAD similarity, then Dijkstra shortest path to goal node
