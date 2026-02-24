@@ -1053,14 +1053,16 @@ maze-specific data structures need recomputation (~5 min on M4 Max).
 
 ## Part 10: Training Scripts & Pipeline
 
-### Script 1: `generate_mazes.py` (Run on any machine)
+All scripts live in `scripts/` and import from the `vis_nav` package.
+All hyperparameters are centralised in `vis_nav/config.py`.
+
+### Script 1: `scripts/generate_mazes.py` (Run on any machine)
 ```
 Usage:
-  python source/generate_mazes.py \
+  python scripts/generate_mazes.py \
     --n-mazes 30 \
     --size 31 \
     --output-dir training_data/
-    --game-engine-path ../vis_nav_game_public/
 
 Outputs:
   training_data/
@@ -1069,72 +1071,42 @@ Outputs:
   └── ...
 ```
 
-### Script 2: `train_projection.py` (Run on H20 / 5090)
+### Script 2: `scripts/train_projection.py` (Run on H20 / 5090)
 ```
 Usage:
-  python source/train_projection.py \
+  # Multi-maze (recommended):
+  python scripts/train_projection.py \
     --data-dir training_data/ \
-    --backbone dinov2_vitb14 \
-    --output-dim 256 \
-    --epochs-phase-a 30 \
-    --epochs-phase-b 20 \
-    --batch-size 64 \
-    --lr 3e-4 \
-    --device cuda \
-    --texture-dir data/textures/ \
-    --synthetic-ratio 0.2 \
-    --output models/projection_head.pth
+    --device cuda
+
+  # Single practice maze (quick test):
+  python scripts/train_projection.py \
+    --data-dir data/ \
+    --single-maze \
+    --device cuda
 
 Outputs:
-  - models/projection_head.pth   (projection MLP weights)
-  - models/gem_pooling.pth       (GeM pooling parameters)
-  - logs/train_metrics.json      (loss curves, etc.)
+  - models/projection_head.pth       (GeM + Projection MLP weights)
+  - models/projection_head_full.pth  (full model incl. fine-tuned backbone)
+  - models/training_log.json         (loss, config, etc.)
 ```
 
-### Script 3: `train_action_predictor.py` (Run on H20 / 5090)
+### Script 3: `scripts/train_action_predictor.py` (Run on H20 / 5090)
 ```
 Usage:
-  python source/train_action_predictor.py \
-    --data-dir training_data/ \
-    --projection-model models/projection_head.pth \
-    --epochs 30 \
-    --device cuda \
-    --output models/action_predictor.pth
+  python scripts/train_action_predictor.py \
+    --data-dir data/ \
+    --single-maze \
+    --device cuda
 
 Outputs:
   - models/action_predictor.pth
 ```
 
-### Script 4: `extract_features.py` (Run on M4 Max)
-```
-Usage:
-  python source/extract_features.py \
-    --data-dir data/ \
-    --model-path models/projection_head.pth \
-    --device mps \
-    --batch-size 64
-
-Outputs:
-  - cache/dinov2_features.npy
-  - cache/faiss_index.bin
-  - cache/superpoint_cache.pkl
-```
-
-### Script 5: `build_graph.py` (Run on M4 Max)
-```
-Usage:
-  python source/build_graph.py \
-    --features cache/dinov2_features.npy \
-    --data-info data/data_info.json \
-    --n-shortcuts 500 \
-    --per-node-k 3
-
-Outputs:
-  - cache/nav_graph.pkl
-```
-
-All of these are also callable from within `pre_navigation()` so the
-system works end-to-end without manual intervention.
+Feature extraction and graph construction are **not** separate scripts —
+they run automatically inside `player.py → pre_navigation()` with
+disk caching (keyed by data hash). This means the system works
+end-to-end without manual intervention on competition day.
 
 ---
 
@@ -1194,34 +1166,52 @@ system works end-to-end without manual intervention.
 
 ```
 vis_nav_player/
-├── source/
-│   ├── player.py               # Main autonomous player (submit this)
-│   ├── feature_extractor.py    # DINOv2 + GeM + Projection module
-│   ├── nav_graph.py            # Graph construction module
-│   ├── generate_mazes.py       # Multi-maze data generation
-│   ├── train_projection.py     # Projection head training (H20/5090)
-│   ├── train_action_predictor.py  # Action predictor training
-│   ├── extract_features.py     # Offline feature extraction
-│   └── build_graph.py          # Offline graph construction
-├── models/                     # Trained model weights (portable)
+│
+├── player.py                       # ENTRY POINT — game submission
+├── baseline.py                     # Original VLAD baseline (reference)
+│
+├── vis_nav/                        # Main Python package
+│   ├── __init__.py
+│   ├── config.py                   # ALL constants & hyperparameters
+│   ├── utils.py                    # Device detection, caching, I/O
+│   │
+│   ├── models/                     # Neural network modules
+│   │   ├── __init__.py
+│   │   ├── backbone.py             # DINOv2 + GeM + ProjectionMLP
+│   │   └── action_predictor.py     # Fallback action MLP
+│   │
+│   ├── navigation/                 # Online navigation logic
+│   │   ├── __init__.py
+│   │   ├── graph.py                # Topological graph (temporal + visual)
+│   │   ├── localizer.py            # FAISS index + temporal consistency
+│   │   └── planner.py              # Goal setup, check-in, stuck recovery
+│   │
+│   └── data/                       # Datasets & transforms
+│       ├── __init__.py
+│       ├── transforms.py           # Image transforms + batch extraction
+│       └── maze_dataset.py         # MazeExplorationDataset + PKSampler
+│
+├── scripts/                        # Standalone CLI training scripts
+│   ├── train_projection.py         # Train DINOv2 projection head (CUDA)
+│   ├── train_action_predictor.py   # Train action MLP (CUDA)
+│   └── generate_mazes.py           # Generate random maze layouts
+│
+├── models/                         # Trained weights (Git LFS)
 │   ├── projection_head.pth
-│   ├── gem_pooling.pth
 │   └── action_predictor.pth
-├── cache/                      # Auto-generated, gitignored
-│   ├── dinov2_features.npy
-│   ├── faiss_index.bin
-│   ├── nav_graph.pkl
-│   └── superpoint_cache.pkl
-├── training_data/              # Multi-maze training data (gitignored)
-│   ├── maze_001/
-│   ├── maze_002/
-│   └── ...
-├── data/                       # Current maze exploration data
+├── cache/                          # Auto-generated, gitignored
+├── data/                           # Current maze exploration data
 │   ├── data_info.json
 │   ├── images/
-│   └── textures/              # 200 wall texture patterns
-├── Idea.md                     # This document
-└── environment.yaml            # Conda environment
+│   └── textures/                   # 200 wall texture patterns
+├── training_data/                  # Multi-maze training data (gitignored)
+│
+├── setup.sh                        # One-command environment setup
+├── environment.yaml                # Conda environment spec
+├── .gitattributes                  # Git LFS tracking rules
+├── Idea.md                         # This document
+├── CONTEXT.md                      # Cross-device AI assistant context
+└── README.md
 ```
 
 ---
