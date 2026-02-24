@@ -18,74 +18,109 @@
 | Report | 5 pts | PDF format |
 | Participation | 2 pts | ✅ Automatic |
 | Achieving Goal | 3 pts | ✅ Check in at goal |
-| Time to completion | 3 pts | Under 1 min (3 pts) |
+| Time to completion | 3 pts | Under 1 min → 3 pts |
 | Methodology | 2 pts | **Full Automation = 2 pts** |
 | Judge Evaluations | 3 pts | Quality approach |
-| Extra Credits | Bonus | Final competition |
+
+---
+
+## Repository Structure
+
+```
+vis_nav_player/
+│
+├── player.py                       ← ENTRY POINT (game submission)
+├── baseline.py                     ← original VLAD baseline (reference)
+│
+├── vis_nav/                        ← main Python package
+│   ├── __init__.py
+│   ├── config.py                   ← ALL constants & hyperparameters
+│   ├── utils.py                    ← device detection, caching, I/O
+│   │
+│   ├── models/                     ← neural network modules
+│   │   ├── __init__.py
+│   │   ├── backbone.py             ← DINOv2 + GeM + ProjectionMLP
+│   │   └── action_predictor.py     ← fallback action MLP
+│   │
+│   ├── navigation/                 ← navigation logic
+│   │   ├── __init__.py
+│   │   ├── graph.py                ← topological graph (temporal + visual)
+│   │   ├── localizer.py            ← FAISS index + temporal consistency
+│   │   └── planner.py              ← goal setup, check-in, stuck recovery
+│   │
+│   └── data/                       ← datasets & transforms
+│       ├── __init__.py
+│       ├── transforms.py           ← image transforms + batch extraction
+│       └── maze_dataset.py         ← MazeExplorationDataset + PKSampler
+│
+├── scripts/                        ← standalone CLI training scripts
+│   ├── train_projection.py         ← train DINOv2 projection head (CUDA)
+│   ├── train_action_predictor.py   ← train action MLP (CUDA)
+│   └── generate_mazes.py           ← generate random maze layouts
+│
+├── models/                         ← trained weights (Git LFS)
+│   └── .gitkeep
+├── cache/                          ← auto-generated (gitignored)
+├── data/                           ← maze exploration data (gitignored)
+├── training_data/                  ← multi-maze data (gitignored)
+│
+├── source/
+│   └── baseline.py                 ← kept for README backward compat
+│
+├── setup.sh                        ← one-command env setup
+├── environment.yaml                ← conda env spec
+├── requirements.txt
+├── .gitattributes                  ← Git LFS tracking rules
+├── .gitignore
+├── Idea.md                         ← full system design document
+├── CONTEXT.md                      ← THIS FILE
+└── README.md
+```
 
 ---
 
 ## Architecture
 
 ```
-FPV Image → DINOv2 ViT-B/14 (frozen) → GeM Pooling → Projection MLP → 256-dim descriptor
-                                                                              │
-                                                                              ▼
-                                                                    FAISS Nearest Neighbor
-                                                                              │
-                                                                              ▼
-                                                              Topological Graph + A* Planning
-                                                                              │
-                                                                              ▼
-                                                                    Autonomous Navigation
+FPV Image → DINOv2 ViT-B/14 (frozen) → GeM Pooling → Projection MLP → 256-dim
+                                                                          │
+                                                              FAISS Nearest Neighbor
+                                                                          │
+                                                          Topological Graph + A*
+                                                                          │
+                                                              Autonomous Navigation
 ```
 
-### Key Files
-| File | Purpose | Run On |
-|---|---|---|
-| `source/player.py` | **Main autonomous player (submission)** | M4 Max / Any |
-| `source/feature_extractor.py` | DINOv2 + GeM + Projection module | Imported |
-| `source/nav_graph.py` | Topological graph construction | Imported |
-| `source/train_projection.py` | Train DINOv2 projection head | **CUDA GPU** |
-| `source/train_action_predictor.py` | Train action predictor MLP | **CUDA GPU** |
-| `source/generate_mazes.py` | Generate random maze layouts | Any |
-| `source/baseline.py` | Original VLAD baseline (reference only) | Any |
-| `models/projection_head.pth` | Trained projection weights (Git LFS) | — |
-| `models/action_predictor.pth` | Trained action predictor weights (Git LFS) | — |
+### Config lives in one place
+
+All tunable constants are in `vis_nav/config.py` as frozen dataclasses:
+
+- `PathCfg` — file paths
+- `FeatureCfg` — backbone / projection hyper-params
+- `GraphCfg` — graph construction
+- `NavCfg` — online navigation
+- `TrainCfg` — training hyper-params
+
+Other modules import from config — no magic numbers scattered around.
 
 ---
 
 ## Compute Devices
 
-### Device 1: Apple M4 Max (Development & Inference)
-- **OS**: macOS
-- **RAM**: 128 GB
-- **GPU**: MPS (Metal Performance Shaders)
-- **Role**: Development, testing, competition-day inference
-- **PyTorch device**: `mps`
-
-### Device 2: NVIDIA RTX 5090 Laptop (Training Option A)
-- **Role**: Training projection head + action predictor
-- **PyTorch device**: `cuda`
-
-### Device 3: NVIDIA H20 96 GB (Training Option B)
-- **Role**: Heavy training (multi-maze, large batches)
-- **PyTorch device**: `cuda`
+| Device | Role | PyTorch device |
+|---|---|---|
+| Apple M4 Max (128 GB) | Dev, testing, competition inference | `mps` |
+| NVIDIA RTX 5090 Laptop | Training option A | `cuda` |
+| NVIDIA H20 96 GB | Training option B | `cuda` |
 
 ---
 
 ## Setup on a New Machine
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/YOUR_USERNAME/vis_nav_player.git
 cd vis_nav_player
-
-# 2. Run setup (auto-detects CUDA/MPS/CPU)
-chmod +x setup.sh
-./setup.sh
-
-# 3. Activate environment
+chmod +x setup.sh && ./setup.sh
 conda activate game
 ```
 
@@ -93,53 +128,24 @@ conda activate game
 
 ## Training Workflow (CUDA Machine)
 
-### Step 1: Prepare Training Data
+### Step 1: Train Projection Head
 ```bash
-# Option A: Use single practice maze (data/ already exists)
-# Option B: Generate multiple mazes
-python source/generate_mazes.py --n-mazes 30 --output-dir training_data/
+# Single maze (quick):
+python scripts/train_projection.py --data-dir data/ --single-maze --device cuda
 
-# For actual images, run the game engine on each maze
-# (see generate_mazes.py output for details)
+# Multi-maze (full):
+python scripts/train_projection.py --data-dir training_data/ --device cuda
 ```
 
-### Step 2: Train Projection Head
+### Step 2: Train Action Predictor
 ```bash
-# Single maze (quick test):
-python source/train_projection.py \
-  --data-dir data/ \
-  --single-maze \
-  --output models/projection_head.pth \
-  --device cuda \
-  --epochs-phase-a 30 \
-  --epochs-phase-b 20
-
-# Multi-maze (full training):
-python source/train_projection.py \
-  --data-dir training_data/ \
-  --output models/projection_head.pth \
-  --device cuda \
-  --epochs-phase-a 30 \
-  --epochs-phase-b 20 \
-  --texture-dir data/textures/ \
-  --synthetic-ratio 0.2
+python scripts/train_action_predictor.py \
+    --data-dir data/ --single-maze --device cuda
 ```
 
-### Step 3: Train Action Predictor
+### Step 3: Push Trained Models
 ```bash
-python source/train_action_predictor.py \
-  --data-dir data/ \
-  --single-maze \
-  --projection-model models/projection_head.pth \
-  --output models/action_predictor.pth \
-  --device cuda
-```
-
-### Step 4: Push Trained Models
-```bash
-git add models/
-git commit -m "Add trained model weights"
-git push
+git add models/ && git commit -m "trained weights" && git push
 ```
 
 ---
@@ -147,74 +153,34 @@ git push
 ## Running the Player
 
 ```bash
-# Activate environment
 conda activate game
-
-# Run autonomous player
-python source/player.py
-
-# Run original baseline (for comparison)
-python source/baseline.py
+python player.py              # autonomous player
+python baseline.py            # original VLAD baseline
 ```
 
 ---
 
 ## Current Status
 
-- [x] Feature extractor module (DINOv2 + GeM + Projection)
-- [x] Navigation graph module
-- [x] Training scripts (projection + action predictor)
-- [x] Multi-maze generation script
-- [x] Fully autonomous player
-- [x] Setup script (Linux/macOS)
-- [x] Git LFS for model weights
-- [ ] **TRAINING NOT YET DONE** — need to run on CUDA machine
-- [ ] **TESTING** — need to verify end-to-end with trained models
+- [x] Package structure (`vis_nav/`)
+- [x] Centralised config
+- [x] DINOv2 + GeM + Projection backbone
+- [x] Topological navigation graph
+- [x] FAISS localiser + temporal consistency
+- [x] Goal planner (multi-view, stuck recovery, check-in)
+- [x] Action predictor fallback
+- [x] Training scripts (projection + action)
+- [x] setup.sh + Git LFS
+- [ ] **TRAINING NOT YET DONE** — run on CUDA machine
+- [ ] **END-TO-END TEST** with trained models
 - [ ] Report (PDF)
 
 ---
 
 ## Important Notes
 
-1. **Model weights** are tracked via Git LFS (`models/*.pth`, `models/*.pt`)
-2. **Cache files** (`cache/`) are gitignored — auto-generated at runtime
-3. **Training data** (`training_data/`) is gitignored — too large for git
-4. **Practice maze data** (`data/`) is gitignored — downloaded by game engine
-5. The **competition maze is DIFFERENT** from practice — models must generalize
-6. The player auto-detects if trained models exist; falls back to keyboard if not
-7. DINOv2 backbone is downloaded from torch.hub on first run (~350 MB)
-
----
-
-## Key Design Decisions
-
-- **DINOv2 ViT-B/14** (not ViT-S) for better feature quality
-- **256-dim** output descriptors (compact for FAISS, sufficient capacity)
-- **GeM Pooling** over CLS token (better for retrieval)
-- **Multi-Similarity Loss** (better than triplet loss for metric learning)
-- **Cross-maze training** (critical for generalization to unseen mazes)
-- **A\* with feature heuristic** (faster than pure Dijkstra)
-- **Multi-view goal matching** (uses all 4 target views, not just front)
-- **Stuck detection + recovery** (6-step progressive recovery sequence)
-- **Multi-frame check-in confirmation** (avoids false positive check-ins)
-
----
-
-## Troubleshooting
-
-### "vis_nav_game not found"
-```bash
-pip install --extra-index-url https://test.pypi.org/simple/ vis-nav-game
-```
-
-### "CUDA out of memory" during training
-- Reduce `--batch-size` (e.g., 32 instead of 64)
-- Use `--epochs-phase-b 0` to skip backbone fine-tuning
-
-### "Model not found" when running player
-- Train on CUDA machine first, then `git pull` on inference machine
-- Or run without trained model (uses raw DINOv2 features)
-
-### Cache issues
-- Delete `cache/` directory to force re-computation
-- Cache is keyed by data hash, so changing data auto-invalidates
+1. **Model weights** tracked via Git LFS (`models/*.pth`, `models/*.pt`)
+2. **Cache** (`cache/`) is gitignored — auto-generated at runtime
+3. **Competition maze is DIFFERENT** — models must generalise
+4. DINOv2 backbone downloaded from `torch.hub` on first run (~350 MB)
+5. Player auto-detects trained models; falls back to keyboard if missing
