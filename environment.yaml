@@ -1,5 +1,7 @@
 name: game
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
 dependencies:
   - python=3.10.12
@@ -18,4 +20,12 @@ dependencies:
     - vis-nav-game
     - natsort==8.4.0
     - networkx==3.4.2
-
+    # --- Deep learning (auto-detects CUDA if available) ---
+    - torch>=2.1.0
+    - torchvision>=0.16.0
+    - tqdm>=4.65.0
+    # --- FAISS for fast nearest-neighbor search ---
+    - faiss-cpu>=1.7.4
+    # --- Kornia for SuperPoint + LightGlue ---
+    - kornia>=0.7.0
+    - kornia-rs>=0.1.0

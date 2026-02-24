@@ -17,17 +17,22 @@ wheels/
 # Data & large files
 /data/
 /cache/
+/training_data/
 *.zip
 *.pkl
 *.npy
 *.h5
 *.hdf5
-*.pt
-*.pth
 *.onnx
 *.bin
 *.tar
 *.tar.gz
+
+# Model weights tracked via Git LFS — DO NOT add *.pth or *.pt here
+# models/ directory is committed (weights tracked by LFS)
+
+# Game engine (cloned separately)
+/vis_nav_game_public/
 
 # Logs
 *.log
