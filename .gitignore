@@ -1,3 +1,7 @@
+# OS files
+.DS_Store
+Thumbs.db
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -8,8 +12,28 @@ wheels/
 
 # Virtual environments
 .venv
+.env
 
-# Data
+# Data & large files
 /data/
 /cache/
-vis_nav_player.log
+*.zip
+*.pkl
+*.npy
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+*.bin
+*.tar
+*.tar.gz
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
