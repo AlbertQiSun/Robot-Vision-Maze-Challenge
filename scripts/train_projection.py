@@ -52,7 +52,8 @@ class MultiSimilarityLoss(nn.Module):
 
     def forward(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         sim = embeddings @ embeddings.T
-        loss = torch.tensor(0.0, device=embeddings.device)
+        # Use a graph-connected zero so .backward() works even if no valid pairs
+        loss = (embeddings * 0).sum()
         valid = 0
 
         for i in range(len(embeddings)):
@@ -90,7 +91,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
         if labels.unique().numel() < 2:
             continue
         loss = criterion(model(images), labels)
-        if torch.isnan(loss) or torch.isinf(loss):
+        if torch.isnan(loss) or torch.isinf(loss) or not loss.requires_grad:
             continue
         optimizer.zero_grad()
         loss.backward()

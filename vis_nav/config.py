@@ -52,8 +52,8 @@ class FeatureCfg:
 class GraphCfg:
     """Topological graph construction parameters."""
     temporal_fwd_weight: float = 1.0
-    temporal_bwd_weight: float = 1.5
-    visual_edge_weight: float = 0.5
+    temporal_bwd_weight: float = 10.0   # heavily penalize backward traversal
+    visual_edge_weight: float = 0.3     # prefer visual shortcuts over backtracking
 
     min_shortcut_gap: int = 30
     global_top_k: int = 500
@@ -66,23 +66,23 @@ class GraphCfg:
 @dataclass(frozen=True)
 class NavCfg:
     """Online navigation controller parameters."""
-    subsample_rate: int = 2
+    subsample_rate: int = 1
     feature_batch_size: int = 64
 
     # FAISS
     faiss_top_k: int = 10
 
     # Re-localisation
-    relocalize_interval: int = 5
+    relocalize_interval: int = 5      # fast relocalization for carrot-on-a-stick tracking
 
     # Stuck detection
-    stuck_window: int = 8
-    stuck_sim_threshold: float = 0.97
-    stuck_patience: int = 3
+    stuck_window: int = 10             # need more evidence before declaring stuck
+    stuck_sim_threshold: float = 0.98  # very high = only trigger when truly frozen
+    stuck_patience: int = 3            # need 3 consecutive windows
 
-    # Check-in
-    checkin_sim_threshold: float = 0.88
-    checkin_confidence_needed: int = 3
+    # Check-in (strict to avoid false positives)
+    checkin_sim_threshold: float = 0.92
+    checkin_confidence_needed: int = 8
     checkin_graph_dist: int = 3
 
     # Re-ranking
@@ -104,24 +104,24 @@ class TrainCfg:
     pk_K: int = 4
 
     # Phase A (frozen backbone)
-    lr_heads: float = 3e-4
-    epochs_phase_a: int = 30
+    lr_heads: float = 5e-4
+    epochs_phase_a: int = 50
     weight_decay: float = 1e-4
     cosine_T0: int = 10
 
     # Phase B (unfreeze last-N blocks)
-    lr_backbone: float = 1e-5
-    epochs_phase_b: int = 20
+    lr_backbone: float = 5e-6
+    epochs_phase_b: int = 30
     unfreeze_blocks: int = 2
 
     # Dataset
-    subsample_rate: int = 2
-    positive_range: int = 5
-    synthetic_ratio: float = 0.2
+    subsample_rate: int = 1           # use ALL frames (was 2)
+    positive_range: int = 8           # wider "same place" window (was 5)
+    synthetic_ratio: float = 0.15
 
     # Action predictor
     action_lr: float = 1e-3
-    action_epochs: int = 30
+    action_epochs: int = 50
     action_n_goals: int = 10
     action_min_gap: int = 50
     action_max_gap: int = 200

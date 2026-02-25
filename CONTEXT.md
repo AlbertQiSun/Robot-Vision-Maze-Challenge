@@ -40,7 +40,7 @@ vis_nav_player/
 │   ├── models/                     ← neural network modules
 │   │   ├── __init__.py
 │   │   ├── backbone.py             ← DINOv2 + GeM + ProjectionMLP
-│   │   └── action_predictor.py     ← fallback action MLP
+│   │   └── action_predictor.py     ← cross-attention action predictor (2.8M params)
 │   │
 │   ├── navigation/                 ← navigation logic
 │   │   ├── __init__.py
@@ -55,7 +55,7 @@ vis_nav_player/
 │
 ├── scripts/                        ← standalone CLI training scripts
 │   ├── train_projection.py         ← train DINOv2 projection head (CUDA)
-│   ├── train_action_predictor.py   ← train action MLP (CUDA)
+│   ├── train_action_predictor.py   ← train attention action predictor (CUDA)
 │   └── generate_mazes.py           ← generate random maze layouts
 │
 ├── models/                         ← trained weights (Git LFS)
@@ -84,12 +84,22 @@ vis_nav_player/
 ```
 FPV Image → DINOv2 ViT-B/14 (frozen) → GeM Pooling → Projection MLP → 256-dim
                                                                           │
-                                                              FAISS Nearest Neighbor
-                                                                          │
-                                                          Topological Graph + A*
-                                                                          │
-                                                              Autonomous Navigation
+                                                    ┌─────────────────────┤
+                                                    │                     │
+                                              FAISS Index           Action Predictor
+                                           (check-in detection)   (primary controller)
+                                                    │                     │
+                                                    │     Cross-Attention + Comparison
+                                                    │     current_feat ↔ goal_feat
+                                                    │            │
+                                                    └──── Autonomous Navigation
 ```
+
+### Navigation Strategy
+- **Primary**: Attention-based action predictor (2.8M params) directly
+  predicts FORWARD/LEFT/RIGHT/BACKWARD from current + goal features
+- **Check-in**: FAISS nearest-neighbor + graph distance to detect goal arrival
+- **Stuck recovery**: Feature similarity monitoring + burst escape sequences
 
 ### Config lives in one place
 
@@ -137,10 +147,10 @@ python scripts/train_projection.py --data-dir data/ --single-maze --device cuda
 python scripts/train_projection.py --data-dir training_data/ --device cuda
 ```
 
-### Step 2: Train Action Predictor
+### Step 2: Train Action Predictor (Attention-based, 2.8M params)
 ```bash
 python scripts/train_action_predictor.py \
-    --data-dir data/ --single-maze --device cuda
+    --data-dir data/ --single-maze --device cuda --subsample 1 --epochs 80
 ```
 
 ### Step 3: Push Trained Models
@@ -168,11 +178,14 @@ python baseline.py            # original VLAD baseline
 - [x] Topological navigation graph
 - [x] FAISS localiser + temporal consistency
 - [x] Goal planner (multi-view, stuck recovery, check-in)
-- [x] Action predictor fallback
+- [x] Cross-attention action predictor (2.8M params, primary controller)
 - [x] Training scripts (projection + action)
-- [x] setup.sh + Git LFS
-- [ ] **TRAINING NOT YET DONE** — run on CUDA machine
-- [ ] **END-TO-END TEST** with trained models
+- [x] setup.sh + Git LFS + pyproject.toml
+- [x] Projection head trained (R@1=0.82, R@10=0.999)
+- [x] Action predictor trained
+- [x] numpy/torch/FAISS compatibility fixes
+- [ ] **RETRAIN action predictor** with new attention architecture
+- [ ] **END-TO-END TEST** with retrained models
 - [ ] Report (PDF)
 
 ---
@@ -184,3 +197,8 @@ python baseline.py            # original VLAD baseline
 3. **Competition maze is DIFFERENT** — models must generalise
 4. DINOv2 backbone downloaded from `torch.hub` on first run (~350 MB)
 5. Player auto-detects trained models; falls back to keyboard if missing
+6. **PyTorch 2.10 + numpy 1.26 compat**: `.cpu().numpy()` arrays must be
+   laundered with `np.array(x, copy=True)` before passing to FAISS or
+   `torch.from_numpy()` — see `vis_nav/utils.py:to_numpy()`
+7. **FAISS**: Must use `faiss-cpu==1.7.4` (newer versions broken with numpy 1.26)
+8. **Transforms**: Use `torchvision.transforms.v2` API (v1 `ToPILImage`/`ToTensor` broken)

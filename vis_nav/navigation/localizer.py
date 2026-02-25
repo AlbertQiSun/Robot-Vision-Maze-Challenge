@@ -29,7 +29,8 @@ class Localizer:
 
             dim = self.features.shape[1]
             self.faiss_index = faiss.IndexFlatIP(dim)
-            self.faiss_index.add(self.features.astype(np.float32))
+            feats = np.ascontiguousarray(self.features, dtype=np.float32)
+            self.faiss_index.add(feats)
         except ImportError:
             self.faiss_index = None
 
@@ -46,8 +47,11 @@ class Localizer:
 
         if self.prev_nodes:
             prev = self.prev_nodes[-1]
+            # Stronger temporal consistency: if a candidate is within
+            # 50 frames of where we were recently, and its score is decent,
+            # prefer it heavily over distant nodes.
             for node, score in zip(candidates, scores):
-                if abs(node - prev) < 20 and score > best_score * 0.95:
+                if abs(node - prev) < 50 and score > best_score * 0.85:
                     best_node = node
                     best_score = score
                     break
@@ -66,9 +70,8 @@ class Localizer:
         self, feat: np.ndarray, k: int,
     ) -> tuple[list[int], list[float]]:
         if self.faiss_index is not None:
-            D, I = self.faiss_index.search(
-                feat.reshape(1, -1).astype(np.float32), k,
-            )
+            q = np.ascontiguousarray(feat.reshape(1, -1), dtype=np.float32)
+            D, I = self.faiss_index.search(q, k)
             return I[0].tolist(), D[0].tolist()
 
         sims = self.features @ feat

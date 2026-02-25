@@ -58,6 +58,9 @@ class NavigationGraph:
                 weight=C.temporal_fwd_weight, action=action,
                 edge_type="temporal_forward",
             )
+            # Add temporal backward edges so the robot can retrace its steps.
+            # Walking backwards keeps the camera facing the known exploration view,
+            # which is critical since we don't have images of the reverse direction!
             self.G.add_edge(
                 i + 1, i,
                 weight=C.temporal_bwd_weight,

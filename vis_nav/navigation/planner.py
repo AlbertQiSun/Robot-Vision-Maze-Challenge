@@ -50,6 +50,7 @@ class GoalPlanner:
         self.stuck_buffer: deque[np.ndarray] = deque(maxlen=C.stuck_window)
         self.stuck_counter: int = 0
         self.recovery_phase: int = 0
+        self._recovery_queue: list[str] = []
 
         # Check-in
         self.checkin_confidence: int = 0
@@ -79,11 +80,12 @@ class GoalPlanner:
         self.goal_node = ranked[0][0]
         self.goal_candidates = [c[0] for c in ranked[:5]]
 
-        w = np.array(view_weights[: len(self.goal_features)])
+        w = np.array(view_weights[: len(self.goal_features)], dtype=np.float32)
         w /= w.sum()
-        fused = sum(wi * fi for wi, fi in zip(w, self.goal_features))
+        stacked = np.stack(self.goal_features).astype(np.float32)  # (V, dim)
+        fused = (w[:, None] * stacked).sum(axis=0)                 # weighted mean
         norm = np.linalg.norm(fused)
-        self.goal_feature_fused = fused / norm if norm > 0 else fused
+        self.goal_feature_fused = (fused / norm if norm > 0 else fused).astype(np.float32)
 
         print(
             f"  Goal node: {self.goal_node} (score: {ranked[0][1]:.4f})\n"
@@ -92,7 +94,6 @@ class GoalPlanner:
 
     # ── Localise + plan ──────────────────────────────────────────────
     def localize_and_plan(self, query_feat: np.ndarray, nav_graph) -> None:
-        self.stuck_buffer.append(query_feat)
         self.current_node = self.localizer.localize(query_feat)
 
         if self.goal_node is None:
@@ -132,10 +133,26 @@ class GoalPlanner:
         return self.checkin_confidence >= C.checkin_confidence_needed
 
     # ── Stuck detection ──────────────────────────────────────────────
-    _RECOVERY_ACTIONS = ("LEFT", "FORWARD", "RIGHT", "RIGHT", "FORWARD", "BACKWARD")
+    # Recovery sequences — each is a burst of actions to escape
+    _RECOVERY_SEQUENCES = [
+        # Back up and try a detour to the left
+        ["BACKWARD"] * 10 + ["LEFT"] * 5 + ["FORWARD"] * 10 + ["RIGHT"] * 5 + ["FORWARD"] * 10,
+        # Back up and try a detour to the right
+        ["BACKWARD"] * 10 + ["RIGHT"] * 5 + ["FORWARD"] * 10 + ["LEFT"] * 5 + ["FORWARD"] * 10,
+        # Double backup if really stuck
+        ["BACKWARD"] * 20 + ["LEFT"] * 10 + ["FORWARD"] * 15 + ["RIGHT"] * 10,
+        ["BACKWARD"] * 20 + ["RIGHT"] * 10 + ["FORWARD"] * 15 + ["LEFT"] * 10,
+        # Turn around
+        ["LEFT"] * 20 + ["FORWARD"] * 10,
+        ["RIGHT"] * 20 + ["FORWARD"] * 10,
+    ]
 
     def check_stuck(self) -> str | None:
         """Return an action name if stuck, else ``None``."""
+        # If we're in the middle of a recovery burst, keep going
+        if self._recovery_queue:
+            return self._recovery_queue.pop(0)
+
         if len(self.stuck_buffer) < C.stuck_window:
             return None
 
@@ -153,7 +170,13 @@ class GoalPlanner:
         if self.stuck_counter < C.stuck_patience:
             return None
 
-        self.recovery_phase = (self.recovery_phase + 1) % len(self._RECOVERY_ACTIONS)
+        # Trigger a recovery burst
+        seq = self._RECOVERY_SEQUENCES[
+            self.recovery_phase % len(self._RECOVERY_SEQUENCES)
+        ]
+        self.recovery_phase += 1
+        self._recovery_queue = list(seq[1:])  # queue the rest
         self.current_path = None
         self.stuck_counter = 0
-        return self._RECOVERY_ACTIONS[self.recovery_phase]
+        self.stuck_buffer.clear()
+        return seq[0]  # return the first action now

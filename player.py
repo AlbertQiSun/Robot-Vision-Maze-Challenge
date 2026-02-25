@@ -72,7 +72,12 @@ class KeyboardPlayerPyGame(Player):
         self.nav_graph: NavigationGraph | None = None
         self.localizer: Localizer | None = None
         self.planner: GoalPlanner | None = None
-        self.action_history: deque = deque(maxlen=3)
+        self.action_history: deque = deque(maxlen=20)
+        self._last_node: int | None = None
+        self._same_node_count: int = 0
+        self._path_steps_taken: int = 0
+        self._current_feat: np.ndarray | None = None
+        self._last_turn: str = "LEFT"  # track turn direction for consistency
 
         super().__init__()
 
@@ -163,32 +168,78 @@ class KeyboardPlayerPyGame(Player):
             return self.last_act
 
         self.step_count += 1
-        feat = extract_single_feature(self.feat_model, self.fpv, self.device)
 
-        # 1. check-in?
-        if self.planner.should_checkin(feat, self.nav_graph):
-            print(f"[CHECKIN] step {self.step_count}")
-            return Action.CHECKIN
+        # Extract feature from current view
+        self._current_feat = extract_single_feature(
+            self.feat_model, self.fpv, self.device,
+        )
 
-        # 2. stuck?
-        recovery = self.planner.check_stuck()
-        if recovery is not None:
-            print(f"[RECOVERY] step {self.step_count} → {recovery}")
-            return _ACT_MAP[recovery]
+        # ── Check-in: strict multi-view similarity ──
+        if self.planner.goal_features:
+            sims = [float(np.dot(self._current_feat, gf))
+                    for gf in self.planner.goal_features]
+            max_sim = max(sims)
+            if max_sim > nav_cfg.checkin_sim_threshold:
+                self._checkin_count = getattr(self, '_checkin_count', 0) + 1
+            else:
+                self._checkin_count = max(0, getattr(self, '_checkin_count', 0) - 1)
+            if self._checkin_count >= nav_cfg.checkin_confidence_needed:
+                print(f"[CHECKIN] step {self.step_count} sim={max_sim:.3f}")
+                return Action.CHECKIN
 
-        # 3. re-plan?
+        # ── Localize: find where we are on the exploration trajectory ──
         p = self.planner
-        if (p.current_path is None
-                or p.path_index >= len(p.current_path) - 1
-                or self.step_count % nav_cfg.relocalize_interval == 0):
-            self.planner.localize_and_plan(feat, self.nav_graph)
+        p.current_node = self.localizer.localize(self._current_feat)
 
-        # 4. follow path
-        action = self._next_action()
-        name = _ACT_NAMES.get(action, "FORWARD")
-        if name in ACTION_TO_IDX:
-            self.action_history.append(ACTION_TO_IDX[name])
-        return action
+        # ── Plan path to goal ──
+        if p.goal_node is not None:
+            p.current_path = self.nav_graph.find_path(
+                p.current_node, p.goal_node,
+                goal_feature=p.goal_feature_fused,
+            )
+            p.path_index = 0
+
+        # ── Get the FIRST real action from the path ──
+        # We only take ONE step, then re-localize next frame.
+        action_name = self._get_first_path_action()
+
+        # ── Fallback: action predictor ──
+        if action_name is None and self.action_predictor is not None \
+                and p.goal_feature_fused is not None:
+            idx = self.action_predictor.predict_action(
+                self._current_feat, p.goal_feature_fused,
+                list(self.action_history), self.device,
+            )
+            action_name = IDX_TO_ACTION[idx]
+
+        if action_name is None:
+            action_name = "FORWARD"
+
+        # ── Logging ──
+        if self.step_count % 25 == 0:
+            candidates, scores = self.localizer.query_top_k(
+                self._current_feat, 3)
+            top3 = list(zip(candidates[:3],
+                            [f"{s:.3f}" for s in scores[:3]]))
+            path_len = len(p.current_path) if p.current_path else 0
+            print(f"  [step {self.step_count}] act={action_name} "
+                  f"node={p.current_node} goal={p.goal_node} "
+                  f"path={path_len} top3={top3}")
+
+        self.action_history.append(ACTION_TO_IDX.get(action_name, 0))
+        return _ACT_MAP[action_name]
+
+    def _get_first_path_action(self) -> str | None:
+        """Get the first non-VISUAL action from the current path."""
+        p = self.planner
+        if not p.current_path or len(p.current_path) < 2:
+            return None
+        for i in range(len(p.current_path) - 1):
+            a, b = p.current_path[i], p.current_path[i + 1]
+            edge = self.nav_graph.get_edge_action(a, b)
+            if edge in _ACT_MAP:
+                return edge
+        return None
 
     # ── Internals ────────────────────────────────────────────────────
     def _load_models(self) -> None:
@@ -250,31 +301,6 @@ class KeyboardPlayerPyGame(Player):
         if targets:
             self.planner.setup_goal(targets, self.feat_model, self.device)
 
-    def _next_action(self) -> Action:
-        p = self.planner
-        if p.current_path is None or p.path_index >= len(p.current_path) - 1:
-            return self._fallback()
-        a, b = p.current_path[p.path_index], p.current_path[p.path_index + 1]
-        p.path_index += 1
-        edge = self.nav_graph.get_edge_action(a, b)
-        if edge == "VISUAL":
-            return self._next_action() if p.path_index < len(p.current_path) - 1 \
-                else self._fallback()
-        return _ACT_MAP.get(edge, self._fallback())
-
-    def _fallback(self) -> Action:
-        if self.action_predictor is not None and self.planner.goal_feature_fused is not None:
-            feat = extract_single_feature(self.feat_model, self.fpv, self.device)
-            idx = self.action_predictor.predict_action(
-                feat, self.planner.goal_feature_fused,
-                list(self.action_history), self.device,
-            )
-            return _ACT_MAP[IDX_TO_ACTION[idx]]
-        r = random.random()
-        if r < 0.5:   return Action.FORWARD
-        if r < 0.7:   return Action.LEFT
-        if r < 0.9:   return Action.RIGHT
-        return Action.BACKWARD
 
     def _show_targets(self) -> None:
         targets = self.get_target_images()

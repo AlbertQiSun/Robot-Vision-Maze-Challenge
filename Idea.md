@@ -42,10 +42,11 @@ in **under 30 seconds**, using only onboard camera images from the exploration p
 │  └───────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ Stage 4: Action Prediction Head                                   │  │
-│  │   → Given (current_descriptor, goal_descriptor) → predict action │  │
-│  │   → Small MLP trained on ALL maze trajectories                   │  │
-│  │   → Backup when graph-based planning fails                       │  │
+│  │ Stage 4: Action Prediction Head (Primary Navigation Controller)  │  │
+│  │   → Siamese relational MLP between current & goal descriptors    │  │
+│  │   → Explicit comparison (diff, product) fused with history       │  │
+│  │   → 1.8M param model with Residual blocks, LayerNorm + GELU     │  │
+│  │   → Directly predicts FORWARD/LEFT/RIGHT/BACKWARD               │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
                               │
@@ -908,61 +909,83 @@ verified_goal = self._rerank(targets[0], goal_candidates[:20])[0]
 
 ---
 
-## Part 8: Learned Action Predictor (Backup Controller)
+## Part 8: Attention-Based Action Predictor (Primary Navigation Controller)
 
 ### Why?
-The graph-based planner works well when localization is correct.
-But when localization fails (the robot is in an area not well-covered
-by the graph), we need a fallback.
+Graph-based path following is fragile with noisy motion — actions often
+fail, the robot stays in place, and the path index drifts. Instead, we
+use a **reactive controller** that directly predicts the best action from
+the current view and goal view at every step. This is robust to noisy
+motion because each decision is independent.
 
-### Architecture
-A small network that directly predicts the best action given
-current and goal visual features:
+### Architecture (2.8M parameters)
 
 ```
-┌─────────────────────────────────────────────┐
-│  Input:                                      │
-│    current_feature (256-dim)                 │
-│    goal_feature    (256-dim)                 │
-│    last_3_actions  (3 × one-hot, 12-dim)    │
-│                                              │
-│  Concat → 524-dim                            │
-│  → Linear(524, 256) → ReLU → Dropout(0.2)  │
-│  → Linear(256, 128) → ReLU → Dropout(0.2)  │
-│  → Linear(128, 4)   → Softmax              │
-│                                              │
-│  Output: P(FORWARD), P(LEFT), P(RIGHT),     │
-│          P(BACKWARD)                         │
-└─────────────────────────────────────────────┘
+Current feat (256) ──→ Split into 4×64 tokens ──→ Project to 256-dim
+                                                        │
+Goal feat (256) ────→ Split into 4×64 tokens ──→ Project to 256-dim
+                                                        │
+                                                        ▼
+                                            ┌─ CrossAttentionBlock ×2 ──┐
+                                            │  Cross-Attn: cur → goal   │
+                                            │  Self-Attn: cur → cur     │
+                                            │  FFN: 256 → 1024 → 256   │
+                                            │  (LayerNorm + GELU)       │
+                                            └───────────────────────────┘
+                                                        │
+                                                   Mean Pool → (B, 256)
+                                                        │
+                    ┌───────────────────────────────────┤
+                    │                                    │
+            Explicit Comparison              Attention Output (256)
+            • diff (256-dim)                         │
+            • product (256-dim)                      │
+            • cosine_sim (1-dim)                     │
+                    │                                │
+            Action History (12) → Embed (256)        │
+                    │                                │
+                    └────────── Concatenate ──────────┘
+                                    │ (769-dim)
+                            ┌───────────────────┐
+                            │  MLP Head          │
+                            │  769 → 512 (LN+GELU)
+                            │  512 → 256 (LN+GELU)
+                            │  256 → 4           │
+                            └───────────────────┘
+                                    │
+                                    ▼
+                        FORWARD / LEFT / RIGHT / BACKWARD
 ```
 
-### Training Data — Multi-Maze Action Pairs
-From ALL exploration trajectories across ALL mazes:
+**Key design choices:**
+- **Cross-attention** lets the model learn "what direction is the goal
+  relative to where I am?" — attends to goal tokens from current tokens
+- **Explicit comparison** (diff, product, cosine) gives the model direct
+  access to the relationship between current and goal features
+- **Multi-range training** with short (5-30), medium (30-100), and long
+  (100-300) step goals — teaches both fine and coarse navigation
+- **Label smoothing** (0.05) + **cosine LR schedule** for better generalization
+
+### Training Data — Multi-Range Action Pairs
 ```python
-# For each maze m in training_mazes:
-#   For each frame i in maze m's trajectory:
-#     For several random future frames j (50 to 200 steps ahead):
-#       Input:  (feature_i, feature_j)
-#       Label:  action_at_frame_i
+# For each frame i in the exploration trajectory:
+#   For each range (short=5-30, medium=30-100, long=100-300):
+#     Sample random future frames j within that range
+#     Input:  (feature_i, feature_j, action_history)
+#     Label:  action_at_frame_i
 #
-# Also generate reverse traversals:
-#   Input:  (feature_j, feature_i)
-#   Label:  REVERSE(action_at_frame_j-1)
-#
-# Training on multi-maze data teaches the action predictor to generalize:
-# "given what I see now and what the goal looks like, which way should I go?"
-# This works across mazes because the relationship between visual change
-# and action is universal (turning left always shifts the view right, etc.)
+#     Also generate reverse traversals:
+#     Input:  (feature_j, feature_i, action_history)
+#     Label:  REVERSE(action_at_frame_j-1)
 ```
 
-**Dataset size:** 20 mazes × 12K frames × 10 goal samples = **~2.4M pairs**.
-Tiny MLP trains in minutes even on CPU.
-
-### When to Use the Action Predictor
-- When the graph-based planner returns '?' (unknown action)
-- When stuck recovery hasn't worked after 3 cycles
-- When localization confidence is very low
-- As a tiebreaker when the planner is ambiguous
+### Role in Navigation
+The action predictor is the **primary controller** during navigation:
+1. Extract current FPV feature with DINOv2 + projection head
+2. Compare with fused goal feature (weighted average of 4 target views)
+3. Action predictor outputs the next action directly
+4. Graph + FAISS are used only for **check-in detection** (are we at the goal?)
+5. Stuck detection triggers recovery bursts when the robot isn't moving
 
 ---
 
@@ -1178,7 +1201,7 @@ vis_nav_player/
 │   ├── models/                     # Neural network modules
 │   │   ├── __init__.py
 │   │   ├── backbone.py             # DINOv2 + GeM + ProjectionMLP
-│   │   └── action_predictor.py     # Fallback action MLP
+│   │   └── action_predictor.py     # Cross-attention action predictor (2.8M params)
 │   │
 │   ├── navigation/                 # Online navigation logic
 │   │   ├── __init__.py
@@ -1193,7 +1216,7 @@ vis_nav_player/
 │
 ├── scripts/                        # Standalone CLI training scripts
 │   ├── train_projection.py         # Train DINOv2 projection head (CUDA)
-│   ├── train_action_predictor.py   # Train action MLP (CUDA)
+│   ├── train_action_predictor.py   # Train attention action predictor (CUDA)
 │   └── generate_mazes.py           # Generate random maze layouts
 │
 ├── models/                         # Trained weights (Git LFS)
@@ -1230,6 +1253,6 @@ vis_nav_player/
 | Stuck handling | None | 6-step progressive recovery |
 | Check-in | Manual SPACE key | Multi-frame confidence thresholding |
 | Generalization | Single maze only | Cross-maze trained, texture-aware |
-| Fallback | None | Learned action predictor |
+| Navigation | Manual keyboard | Attention-based action predictor (2.8M params) |
 | Speed | Human reaction time | ~20-40 sec typical |
 | Methodology pts | 1 (manual) | 2 (full automation) |

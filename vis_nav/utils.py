@@ -14,6 +14,23 @@ import torch
 from vis_nav.config import paths, nav_cfg, PURE_ACTIONS
 
 
+# ── Numpy / Torch compatibility ──────────────────────────────────────────
+def to_numpy(x) -> np.ndarray:
+    """
+    Safely convert *x* to a genuine ``numpy.ndarray``.
+
+    PyTorch 2.10 + numpy ≥1.26 have a type-identity mismatch:
+    ``Tensor.numpy()`` returns an array whose ``type()`` is not recognised
+    by ``torch.from_numpy``, FAISS ``swig_ptr``, etc.  Passing through
+    ``np.array(..., copy=True)`` produces a "clean" array that every
+    library accepts.
+    """
+    if isinstance(x, np.ndarray):
+        return x                       # already a real numpy array
+    # Covers torch-created arrays and any other array-like
+    return np.array(x, copy=True)
+
+
 # ── Device ──────────────────────────────────────────────────────────────
 def get_device() -> torch.device:
     """Return the best available PyTorch device (cuda > mps > cpu)."""
