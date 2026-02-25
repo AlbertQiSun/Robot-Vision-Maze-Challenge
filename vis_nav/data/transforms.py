@@ -32,21 +32,33 @@ def get_inference_transform():
 
 
 def get_train_transform():
-    """Heavy augmentation for metric-learning training."""
+    """Heavy augmentation for metric-learning training.
+
+    Tuned specifically for the exploration→competition domain gap:
+    the competition maze has different lighting, texture colours, and
+    rendering conditions than the exploration maze used for training.
+    Pushing all photometric parameters harder forces the model to learn
+    appearance-invariant place descriptors instead of memorising pixel
+    statistics of the exploration environment.
+    """
     return T.Compose([
         T.Lambda(_numpy_to_pil),
-        # Spatial
-        T.RandomResizedCrop(C.input_size, scale=(0.7, 1.0), ratio=(0.85, 1.15)),
-        T.RandomPerspective(distortion_scale=0.15, p=0.3),
-        # Photometric
-        T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.05),
-        T.RandomGrayscale(p=0.05),
-        # Convert to tensor first — GaussianBlur on PIL is broken with numpy>=1.26
+        # Spatial — wider crop + stronger perspective to simulate viewpoint variation
+        T.RandomResizedCrop(C.input_size, scale=(0.55, 1.0), ratio=(0.75, 1.33)),
+        T.RandomPerspective(distortion_scale=0.25, p=0.5),
+        # Photometric — substantially heavier than before for domain robustness
+        T.ColorJitter(brightness=0.7, contrast=0.7, saturation=0.6, hue=0.15),
+        T.RandomGrayscale(p=0.10),
+        T.RandomEqualize(p=0.10),     # simulates gamma / tone-mapping differences
+        # Convert to tensor
         T.ToImage(),
         T.ToDtype(torch.float32, scale=True),
-        T.GaussianBlur(kernel_size=7, sigma=(0.1, 3.0)),
-        # Corruption
-        T.RandomErasing(p=0.2, scale=(0.02, 0.15)),
+        # Heavier blur range (competition may render at lower effective sharpness)
+        T.GaussianBlur(kernel_size=9, sigma=(0.1, 5.0)),
+        # Sensor noise simulation
+        T.Lambda(lambda x: (x + torch.randn_like(x) * 0.03).clamp(0.0, 1.0)),
+        # Corruption — larger erase patches
+        T.RandomErasing(p=0.3, scale=(0.02, 0.25)),
         # Normalise
         T.Normalize(mean=C.imagenet_mean, std=C.imagenet_std),
     ])

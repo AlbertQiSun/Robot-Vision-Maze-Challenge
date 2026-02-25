@@ -52,7 +52,7 @@ class FeatureCfg:
 class GraphCfg:
     """Topological graph construction parameters."""
     temporal_fwd_weight: float = 1.0
-    temporal_bwd_weight: float = 10.0   # heavily penalize backward traversal
+    temporal_bwd_weight: float = 4.0    # moderate backtrack penalty (was 10.0)
     visual_edge_weight: float = 0.3     # prefer visual shortcuts over backtracking
 
     min_shortcut_gap: int = 30
@@ -75,19 +75,35 @@ class NavCfg:
     # Re-localisation
     relocalize_interval: int = 5      # fast relocalization for carrot-on-a-stick tracking
 
-    # Stuck detection
-    stuck_window: int = 10             # need more evidence before declaring stuck
-    stuck_sim_threshold: float = 0.98  # very high = only trigger when truly frozen
-    stuck_patience: int = 3            # need 3 consecutive windows
+    # Localizer — Gaussian motion-prior + temporal feature averaging
+    localizer_motion_sigma: float = 12.0   # Gaussian prior std in nodes (~1–2 physical steps)
+    localizer_feat_avg_window: int = 3     # frames to average before FAISS query
+    localizer_min_score: float = 0.60      # below this AND large jump → hold previous node
+    # kept for dead-reckoning fallback check only (no longer used as hard cutoff)
+    localizer_temporal_window: int = 20    # max jump allowed for dead-reckoning fallback
 
-    # Check-in (strict to avoid false positives)
-    checkin_sim_threshold: float = 0.92
-    checkin_confidence_needed: int = 8
+    # Stuck detection — node-spread based (replaces feature-similarity)
+    stuck_window: int = 20             # history length (nodes) — need 20 normal steps to fill
+    stuck_node_spread: int = 15        # if max-min node spread < this over the window → stuck
+    stuck_patience: int = 5            # consecutive detections before recovery (was 2, too eager)
+    post_recovery_cooldown: int = 40   # normal steps to skip after recovery before re-evaluating
+
+    # Check-in (calibrated to competition maze — exploration maze scores ~0.82+,
+    #           competition maze only reaches 0.22–0.51 throughout navigation)
+    checkin_sim_threshold: float = 0.52   # above this → +1 confidence (was 0.82, unreachable)
+    checkin_min_sim: float = 0.35         # below this → hard reset, definitely not at goal
+    checkin_confidence_needed: int = 5
     checkin_graph_dist: int = 3
 
     # Re-ranking
     use_reranking: bool = True
     rerank_top_k: int = 20
+
+    # Action smoothing & re-plan throttling
+    action_smooth_window: int = 3   # majority-vote window
+    replan_cooldown: int = 5        # replan every 6 steps; localization flicker was causing
+                                    # plan thrashing (was 1 → back-and-forth observed in logs)
+    replan_node_thresh: int = 20    # only force-replan if node shifts > 20 frames
 
 
 # ── Training ───────────────────────────────────────────────────────────

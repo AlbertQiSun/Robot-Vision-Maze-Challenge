@@ -45,9 +45,9 @@ class ActionPairDataset(Dataset):
                  n_goals=train_cfg.action_n_goals):
         self.pairs: list[tuple] = []
 
-        # Multiple ranges: short (1-10), medium (10-30), long (30-100)
-        # Adding very short ranges (1-10) is critical for local steering precision!
-        ranges = [(1, 10), (10, 30), (30, 100)]
+        # Short-range only: long-range labels are noise because the local
+        # action at frame i has little to do with direction to a goal 50+ away.
+        ranges = [(1, 8), (8, 20)]
 
         for mid, feats in features_by_maze.items():
             frames = frames_by_maze[mid]

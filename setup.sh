@@ -79,7 +79,7 @@ conda activate "$ENV_NAME"
 
 if [[ "$FORCE_CPU" == true ]]; then
     echo "  Installing PyTorch (CPU-only)..."
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu -q
+    python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu -q
 elif [[ "$HAS_CUDA" == true ]]; then
     if [[ -n "$CUDA_VER" ]]; then
         CU_TAG="cu${CUDA_VER//./}"
@@ -93,19 +93,19 @@ elif [[ "$HAS_CUDA" == true ]]; then
         fi
     fi
     echo "  Installing PyTorch (CUDA ${CU_TAG})..."
-    pip install torch torchvision --index-url "https://download.pytorch.org/whl/${CU_TAG}" -q
+    python -m pip install torch torchvision --index-url "https://download.pytorch.org/whl/${CU_TAG}" -q
 else
     echo "  Installing PyTorch (default — CPU or MPS)..."
-    pip install torch torchvision -q
+    python -m pip install torch torchvision -q
 fi
 
 # ---- 5. Install remaining pip dependencies ----
 echo ""
 echo "[STEP 3/5] Installing additional dependencies..."
-pip install faiss-cpu>=1.7.4 kornia>=0.7.0 kornia-rs>=0.1.0 tqdm>=4.65.0 natsort networkx -q
+python -m pip install faiss-cpu>=1.7.4 kornia>=0.7.0 kornia-rs>=0.1.0 tqdm>=4.65.0 natsort networkx -q
 
 # Install vis-nav-game from test PyPI
-pip install --extra-index-url https://test.pypi.org/simple/ vis-nav-game -q 2>/dev/null || \
+python -m pip install --extra-index-url https://test.pypi.org/simple/ vis-nav-game -q 2>/dev/null || \
     echo "  [WARN] vis-nav-game install may have issues — will work if already in conda env"
 
 # ---- 6. Set up Git LFS ----

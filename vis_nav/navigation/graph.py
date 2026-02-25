@@ -130,6 +130,21 @@ class NavigationGraph:
         print(f"  Added {count * 2} per-node shortcut edges")
 
     # ── Path planning ────────────────────────────────────────────────
+    @staticmethod
+    def _edge_weight(u: int, v: int, d: dict) -> float:
+        """Weight function used by A* / Dijkstra at query time.
+
+        Visual shortcut edges are stored with weight=0.3 (built during
+        exploration) but at navigation time we strongly penalise them
+        (weight=50) so the planner follows the recorded temporal path
+        instead of routing the robot through shortcuts that may cross walls.
+        A shortcut is only taken if the temporal detour would cost > 50 hops,
+        which essentially never happens in a 31×31 maze.
+        """
+        if d.get("edge_type", "").startswith("temporal"):
+            return d.get("weight", 1.0)
+        return 50.0  # visual shortcuts: last-resort only
+
     def find_path(
         self,
         start: int,
@@ -144,13 +159,15 @@ class NavigationGraph:
                     sim = float(self.features[node] @ goal_feature)
                     return max(0, 1 - sim) * C.heuristic_scale
                 return nx.astar_path(
-                    self.G, start, goal, heuristic=heuristic, weight="weight",
+                    self.G, start, goal,
+                    heuristic=heuristic, weight=self._edge_weight,
                 )
-            return nx.shortest_path(self.G, start, goal, weight="weight")
+            return nx.dijkstra_path(self.G, start, goal, weight=self._edge_weight)
         except nx.NetworkXNoPath:
             try:
-                return nx.shortest_path(
-                    self.G.to_undirected(), start, goal, weight="weight",
+                # Undirected fallback still prefers temporal edges
+                return nx.dijkstra_path(
+                    self.G.to_undirected(), start, goal, weight=self._edge_weight,
                 )
             except nx.NetworkXNoPath:
                 return [start]

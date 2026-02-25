@@ -1,11 +1,10 @@
 """
-Visual localiser: FAISS index + temporal consistency filter.
+Visual localiser: FAISS index + temporal feature averaging + Gaussian motion prior.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from typing import Optional
 
 import numpy as np
 
@@ -13,12 +12,40 @@ from vis_nav.config import nav_cfg as C
 
 
 class Localizer:
-    """Maintains a FAISS index and provides temporally-consistent localisation."""
+    """Maintains a FAISS index and provides temporally-consistent localisation.
 
-    def __init__(self, features: np.ndarray):
+    Two-stage improvement over the original single-frame FAISS winner-take-all:
+
+    1. **Temporal feature averaging** — the last ``localizer_feat_avg_window``
+       feature vectors are averaged and re-normalised before the FAISS query.
+       Consecutive frames share the dominant "place signature" but have
+       independent per-frame noise; the mean cancels that noise, giving a
+       cleaner query that generalises better across the exploration→competition
+       domain gap (where single-frame scores drop to 0.22–0.51).
+
+    2. **Gaussian motion-prior re-scoring** — instead of a hard binary window
+       (accept / reject based on ``|node − prev| < window``), every FAISS
+       candidate is multiplied by a Gaussian prior centred at the previous
+       node with std ``localizer_motion_sigma``.  This:
+         • Naturally prefers nearby candidates without completely discarding
+           distant high-confidence ones.
+         • Replaces the hard threshold that caused "snap-to-wrong-place" jumps
+           whenever no candidate fell inside the narrow window.
+         • The dead-reckoning fallback is retained as a last resort:  if the
+           best raw FAISS score is below ``localizer_min_score`` *and* the
+           motion-prior winner is far from the previous node, hold the
+           previous estimate rather than leaping to a low-confidence match.
+    """
+
+    def __init__(self, features: np.ndarray) -> None:
         self.features = features
         self.faiss_index = None
         self.prev_nodes: deque[int] = deque(maxlen=5)
+
+        # Rolling buffer of recent feature vectors for query averaging
+        self._feat_buffer: deque[np.ndarray] = deque(
+            maxlen=C.localizer_feat_avg_window
+        )
 
         self._build_index()
 
@@ -36,38 +63,60 @@ class Localizer:
 
     # ── Query ────────────────────────────────────────────────────────
     def localize(self, query_feat: np.ndarray, top_k: int = C.faiss_top_k) -> int:
-        """
-        Return the database node that best matches *query_feat*,
-        with temporal consistency filtering.
-        """
-        candidates, scores = self._raw_query(query_feat, top_k)
+        """Return the best-matching database node with motion-prior filtering."""
 
-        best_node = candidates[0]
-        best_score = scores[0]
+        # ── 1. Temporal feature averaging ────────────────────────────
+        self._feat_buffer.append(query_feat)
+        if len(self._feat_buffer) >= 2:
+            stacked = np.stack(self._feat_buffer).astype(np.float32)
+            avg = stacked.mean(axis=0)
+            norm = float(np.linalg.norm(avg))
+            query = (avg / norm if norm > 1e-9 else avg).astype(np.float32)
+        else:
+            query = query_feat
 
+        # ── 2. Raw FAISS query — extra candidates for re-scoring ─────
+        candidates, scores = self._raw_query(query, top_k * 2)
+        best_raw_score = float(scores[0])
+
+        # ── 3. Gaussian motion-prior re-scoring ──────────────────────
         if self.prev_nodes:
-            prev = self.prev_nodes[-1]
-            # Stronger temporal consistency: if a candidate is within
-            # 50 frames of where we were recently, and its score is decent,
-            # prefer it heavily over distant nodes.
+            prev = int(self.prev_nodes[-1])
+            sigma = float(C.localizer_motion_sigma)
+
+            best_combined = -1.0
+            best_node = int(candidates[0])
+
             for node, score in zip(candidates, scores):
-                if abs(node - prev) < 50 and score > best_score * 0.85:
-                    best_node = node
-                    best_score = score
-                    break
+                dist = abs(int(node) - prev)
+                prior = float(np.exp(-0.5 * (dist / sigma) ** 2))
+                combined = float(score) * prior
+                if combined > best_combined:
+                    best_combined = combined
+                    best_node = int(node)
+
+            # Dead-reckoning fallback: if FAISS confidence is very low AND
+            # the winner is a large jump, hold the previous estimate.
+            if (
+                best_raw_score < C.localizer_min_score
+                and abs(best_node - prev) > C.localizer_temporal_window
+            ):
+                best_node = prev
+        else:
+            best_node = int(candidates[0])
 
         self.prev_nodes.append(best_node)
         return best_node
 
     def query_top_k(
-        self, query_feat: np.ndarray, k: int,
+        self, query_feat: np.ndarray, k: int
     ) -> tuple[list[int], list[float]]:
-        """Raw top-k without temporal filtering."""
+        """Raw top-k without temporal filtering (used for logging)."""
         return self._raw_query(query_feat, k)
 
-    # ── internals ────────────────────────────────────────────────────
+    # ── Internals ────────────────────────────────────────────────────
     def _raw_query(
-        self, feat: np.ndarray, k: int,
+        self, feat: np.ndarray, k: int
     ) -> tuple[list[int], list[float]]:
         if self.faiss_index is not None:
             q = np.ascontiguousarray(feat.reshape(1, -1), dtype=np.float32)
