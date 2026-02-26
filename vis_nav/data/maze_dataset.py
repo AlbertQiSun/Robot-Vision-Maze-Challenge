@@ -70,8 +70,6 @@ class MazeExplorationDataset(Dataset):
 
             for idx, frame in enumerate(motion):
                 img_path = os.path.join(img_dir, frame["image"])
-                if not os.path.exists(img_path):
-                    continue
                 label = maze_id * 100_000 + idx // train_cfg.positive_range
                 self.samples.append((img_path, label, maze_id))
                 _labels.append(label)
